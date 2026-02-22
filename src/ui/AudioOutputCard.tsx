@@ -1,4 +1,3 @@
-import * as React from "react";
 import type { PipelineMode, StageId, StageState } from "../lib/pipeline/types";
 import styles from "./ui.module.css";
 import { Waveform } from "./audio/Waveform";
