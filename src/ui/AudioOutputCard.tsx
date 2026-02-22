@@ -1,5 +1,5 @@
 import type { PipelineMode, StageId, StageState } from "../lib/pipeline/types";
-import styles from "./ui.module.css";
+import styles from "./ui.css";
 import { Waveform } from "./audio/Waveform";
 
 export function AudioOutputCard({

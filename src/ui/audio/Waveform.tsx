@@ -1,13 +1,31 @@
 import * as React from "react";
 
-type Props = {
-  audioUrl?: string;
-  enabled?: boolean;
-};
+type Props =
+  | {
+      // Mode A: accurate waveform by decoding the audio file
+      audioUrl: string;
+      enabled?: boolean;
+      samples?: never;
+      sampleRate?: never;
+    }
+  | {
+      // Mode B: render provided samples directly (already in [-1..1])
+      samples: number[];
+      sampleRate?: number; // optional (only used for metadata display)
+      enabled?: boolean;
+      audioUrl?: never;
+    }
+  | {
+      // Mode C: nothing yet (idle)
+      enabled?: boolean;
+      audioUrl?: undefined;
+      samples?: undefined;
+      sampleRate?: number;
+    };
 
 type WaveData = {
-  peaks: Float32Array;
-  duration: number;
+  peaks: Float32Array; // one peak per pixel column
+  duration: number; // seconds
   sampleRate: number;
 };
 
@@ -28,13 +46,39 @@ function formatTime(s: number) {
   return `${mm}:${String(ss).padStart(2, "0")}`;
 }
 
-export function Waveform({ audioUrl, enabled = true }: Props) {
+function computePeaksFromSamples(samples: Float32Array, columns: number) {
+  const peaks = new Float32Array(columns);
+  const blockSize = Math.floor(samples.length / columns) || 1;
+
+  for (let i = 0; i < columns; i++) {
+    const start = i * blockSize;
+    const end = Math.min(samples.length, start + blockSize);
+    let max = 0;
+    for (let j = start; j < end; j++) {
+      const v = Math.abs(samples[j]);
+      if (v > max) max = v;
+    }
+    peaks[i] = max;
+  }
+  return peaks;
+}
+
+export function Waveform(props: Props) {
+  const enabled = props.enabled ?? true;
+
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const rafRef = React.useRef<number | null>(null);
 
   const [wave, setWave] = React.useState<WaveData | null>(null);
   const [err, setErr] = React.useState<string | null>(null);
+
+  const hasAudioUrl = typeof (props as any).audioUrl === "string" && (props as any).audioUrl.length > 0;
+  const audioUrl = hasAudioUrl ? (props as any).audioUrl as string : undefined;
+
+  const hasSamples = Array.isArray((props as any).samples) && (props as any).samples.length > 0;
+  const inputSamples = hasSamples ? (props as any).samples as number[] : undefined;
+  const inputSampleRate = hasSamples ? ((props as any).sampleRate as number | undefined) : undefined;
 
   const draw = React.useCallback(
     (opts?: { forceIdle?: boolean }) => {
@@ -157,7 +201,8 @@ export function Waveform({ audioUrl, enabled = true }: Props) {
       }
       ctx.stroke();
 
-      if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+      // show playhead only when using audio element
+      if (audioUrl && audio && Number.isFinite(audio.duration) && audio.duration > 0) {
         const cur = Math.min(audio.currentTime, audio.duration);
         const x = padL + (cur / audio.duration) * plotW;
 
@@ -174,9 +219,10 @@ export function Waveform({ audioUrl, enabled = true }: Props) {
         ctx.fillText(`${formatTime(cur)} / ${formatTime(audio.duration)}`, padL + plotW, padT - 2);
       }
     },
-    [wave]
+    [wave, audioUrl]
   );
 
+  // Build wave data from audioUrl OR from samples
   React.useEffect(() => {
     let cancelled = false;
 
@@ -186,7 +232,28 @@ export function Waveform({ audioUrl, enabled = true }: Props) {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    if (!audioUrl || !enabled) {
+    if (!enabled) {
+      draw({ forceIdle: true });
+      return;
+    }
+
+    // Mode B: samples provided
+    if (inputSamples && inputSamples.length > 0) {
+      const width = canvas.clientWidth || 600;
+      const columns = Math.max(200, Math.min(2000, Math.floor(width)));
+      const float = Float32Array.from(inputSamples);
+      const peaks = computePeaksFromSamples(float, columns);
+
+      // If you know real duration, pass it; otherwise show "relative" seconds (we estimate if sampleRate provided)
+      const sr = inputSampleRate ?? 22050;
+      const duration = inputSampleRate ? float.length / sr : 3; // fallback duration if unknown
+
+      setWave({ peaks, duration, sampleRate: sr });
+      return;
+    }
+
+    // Mode A: decode from audioUrl
+    if (!audioUrl) {
       draw({ forceIdle: true });
       return;
     }
@@ -208,19 +275,7 @@ export function Waveform({ audioUrl, enabled = true }: Props) {
 
         const width = canvas.clientWidth || 600;
         const columns = Math.max(200, Math.min(2000, Math.floor(width)));
-        const peaks = new Float32Array(columns);
-        const blockSize = Math.floor(ch0.length / columns) || 1;
-
-        for (let i = 0; i < columns; i++) {
-          const start = i * blockSize;
-          const end = Math.min(ch0.length, start + blockSize);
-          let max = 0;
-          for (let j = start; j < end; j++) {
-            const v = Math.abs(ch0[j]);
-            if (v > max) max = v;
-          }
-          peaks[i] = max;
-        }
+        const peaks = computePeaksFromSamples(ch0, columns);
 
         if (cancelled) return;
         setWave({ peaks, duration, sampleRate });
@@ -235,18 +290,44 @@ export function Waveform({ audioUrl, enabled = true }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [audioUrl, enabled, draw]);
+  }, [audioUrl, enabled, inputSamples, inputSampleRate, draw]);
 
+  // Draw on mount + resize (and also recompute peaks on resize)
   React.useEffect(() => {
-    const onResize = () => draw();
+    const onResize = () => {
+      // recompute peaks when we only have samples mode
+      // (audioUrl mode also benefits but not critical)
+      setWave((prev) => {
+        const canvas = canvasRef.current;
+        if (!canvas || !prev) return prev;
+
+        // If we have input samples, recompute columns to match new width
+        if (inputSamples && inputSamples.length > 0) {
+          const width = canvas.clientWidth || 600;
+          const columns = Math.max(200, Math.min(2000, Math.floor(width)));
+          const float = Float32Array.from(inputSamples);
+          const peaks = computePeaksFromSamples(float, columns);
+          return { ...prev, peaks };
+        }
+
+        return prev;
+      });
+
+      draw();
+    };
+
     window.addEventListener("resize", onResize);
     draw();
     return () => window.removeEventListener("resize", onResize);
-  }, [draw]);
+  }, [draw, inputSamples]);
 
+  // Animate playhead while playing (audioUrl mode only)
   React.useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
+
+    // If no audioUrl, do not attach listeners
+    if (!audioUrl) return;
 
     const tick = () => {
       draw();
@@ -281,7 +362,7 @@ export function Waveform({ audioUrl, enabled = true }: Props) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     };
-  }, [draw]);
+  }, [draw, audioUrl]);
 
   const containerStyle: React.CSSProperties = {
     marginTop: 10,
@@ -295,18 +376,31 @@ export function Waveform({ audioUrl, enabled = true }: Props) {
 
   return (
     <div>
-      <audio ref={audioRef} src={audioUrl} preload="auto" controls style={{ width: "100%", marginTop: 8 }} />
+      {/* Show audio controls only when audioUrl mode is active */}
+      {audioUrl ? (
+        <audio
+          ref={audioRef}
+          src={audioUrl}
+          preload="auto"
+          controls
+          style={{ width: "100%", marginTop: 8 }}
+        />
+      ) : null}
 
       <div style={containerStyle}>
         <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
       </div>
 
-      {!audioUrl ? (
-        <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>Mock mode: no audioUrl yet.</div>
+      {!audioUrl && !inputSamples ? (
+        <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>
+          Mock mode: no audioUrl / samples yet.
+        </div>
       ) : null}
 
       {err ? (
-        <div style={{ marginTop: 8, fontSize: 12, color: "#fecaca" }}>Waveform decode error: {err}</div>
+        <div style={{ marginTop: 8, fontSize: 12, color: "#fecaca" }}>
+          Waveform decode error: {err}
+        </div>
       ) : null}
 
       {wave ? (
