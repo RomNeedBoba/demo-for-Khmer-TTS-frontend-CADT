@@ -1,27 +1,32 @@
 import * as React from "react";
 
-type Props =
-  | {
-      // Mode A: accurate waveform by decoding the audio file
-      audioUrl: string;
-      enabled?: boolean;
-      samples?: never;
-      sampleRate?: never;
-    }
-  | {
-      // Mode B: render provided samples directly (already in [-1..1])
-      samples: number[];
-      sampleRate?: number; // optional (only used for metadata display)
-      enabled?: boolean;
-      audioUrl?: never;
-    }
-  | {
-      // Mode C: nothing yet (idle)
-      enabled?: boolean;
-      audioUrl?: undefined;
-      samples?: undefined;
-      sampleRate?: number;
-    };
+type Props = {
+  /**
+   * If provided, we decode the audio file and draw an accurate full-file waveform + time axis + playhead.
+   * This is the recommended mode.
+   */
+  audioUrl?: string;
+
+  /**
+   * If you don't have an audioUrl yet, you can pass samples directly.
+   * IMPORTANT: if this array is downsampled (e.g. only 2000 points), time labels will be approximate unless you also pass durationSec.
+   */
+  samples?: number[];
+
+  /**
+   * Sample rate for samples-mode metadata/time estimation.
+   * (Only used if `samples` is provided and `durationSec` is not.)
+   */
+  sampleRate?: number;
+
+  /**
+   * Optional: pass real duration (seconds) when using samples-mode and your samples are downsampled.
+   * If omitted, duration is estimated as samples.length / sampleRate.
+   */
+  durationSec?: number;
+
+  enabled?: boolean;
+};
 
 type WaveData = {
   peaks: Float32Array; // one peak per pixel column
@@ -30,6 +35,7 @@ type WaveData = {
 };
 
 function pickTickStepSec(duration: number) {
+  // Aim ~8 ticks across
   const candidates = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60];
   const targetTicks = 8;
   const raw = duration / targetTicks;
@@ -46,7 +52,7 @@ function formatTime(s: number) {
   return `${mm}:${String(ss).padStart(2, "0")}`;
 }
 
-function computePeaksFromSamples(samples: Float32Array, columns: number) {
+function computePeaks(samples: Float32Array, columns: number) {
   const peaks = new Float32Array(columns);
   const blockSize = Math.floor(samples.length / columns) || 1;
 
@@ -63,22 +69,19 @@ function computePeaksFromSamples(samples: Float32Array, columns: number) {
   return peaks;
 }
 
-export function Waveform(props: Props) {
-  const enabled = props.enabled ?? true;
-
+export function Waveform({
+  audioUrl,
+  samples,
+  sampleRate,
+  durationSec,
+  enabled = true,
+}: Props) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const rafRef = React.useRef<number | null>(null);
 
   const [wave, setWave] = React.useState<WaveData | null>(null);
   const [err, setErr] = React.useState<string | null>(null);
-
-  const hasAudioUrl = typeof (props as any).audioUrl === "string" && (props as any).audioUrl.length > 0;
-  const audioUrl = hasAudioUrl ? (props as any).audioUrl as string : undefined;
-
-  const hasSamples = Array.isArray((props as any).samples) && (props as any).samples.length > 0;
-  const inputSamples = hasSamples ? (props as any).samples as number[] : undefined;
-  const inputSampleRate = hasSamples ? ((props as any).sampleRate as number | undefined) : undefined;
 
   const draw = React.useCallback(
     (opts?: { forceIdle?: boolean }) => {
@@ -93,10 +96,12 @@ export function Waveform(props: Props) {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
 
+      // HiDPI
       canvas.width = Math.floor(w * dpr);
       canvas.height = Math.floor(h * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+      // Theme colors (match your dark UI)
       const bg = "rgba(9,9,11,0.55)";
       const grid = "rgba(255,255,255,0.08)";
       const axis = "rgba(255,255,255,0.12)";
@@ -105,18 +110,21 @@ export function Waveform(props: Props) {
       const text = "rgba(161,161,170,0.95)";
       const playhead = "rgba(251,113,133,0.95)";
 
+      // Plot area
       const padL = 10;
       const padR = 10;
-      const padT = 10;
-      const padB = 22;
+      const padT = 12;
+      const padB = 24; // time labels
       const plotW = Math.max(1, w - padL - padR);
       const plotH = Math.max(1, h - padT - padB);
       const midY = padT + plotH / 2;
 
+      // Background
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = bg;
       ctx.fillRect(0, 0, w, h);
 
+      // Mid line
       ctx.strokeStyle = axis;
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -124,6 +132,7 @@ export function Waveform(props: Props) {
       ctx.lineTo(padL + plotW, midY);
       ctx.stroke();
 
+      // Idle state (no wave yet)
       if (!wave || opts?.forceIdle) {
         ctx.strokeStyle = "rgba(34,211,238,0.55)";
         ctx.lineWidth = 2;
@@ -149,7 +158,8 @@ export function Waveform(props: Props) {
         return;
       }
 
-      const duration = wave.duration;
+      // Grid + time labels
+      const duration = Math.max(0.001, wave.duration);
       const step = pickTickStepSec(duration);
 
       ctx.font = "12px ui-sans-serif, system-ui";
@@ -170,6 +180,7 @@ export function Waveform(props: Props) {
         ctx.fillText(label, x, padT + plotH + 4);
       }
 
+      // Waveform
       const peaks = wave.peaks;
       const amp = plotH * 0.45;
 
@@ -177,6 +188,7 @@ export function Waveform(props: Props) {
       ctx.strokeStyle = waveColor;
       ctx.lineWidth = 1.5;
 
+      // filled shape
       ctx.beginPath();
       for (let i = 0; i < peaks.length; i++) {
         const x = padL + (i / (peaks.length - 1)) * plotW;
@@ -192,6 +204,7 @@ export function Waveform(props: Props) {
       ctx.closePath();
       ctx.fill();
 
+      // crisp top outline
       ctx.beginPath();
       for (let i = 0; i < peaks.length; i++) {
         const x = padL + (i / (peaks.length - 1)) * plotW;
@@ -201,7 +214,7 @@ export function Waveform(props: Props) {
       }
       ctx.stroke();
 
-      // show playhead only when using audio element
+      // Playhead only if we have a real audio element
       if (audioUrl && audio && Number.isFinite(audio.duration) && audio.duration > 0) {
         const cur = Math.min(audio.currentTime, audio.duration);
         const x = padL + (cur / audio.duration) * plotW;
@@ -213,16 +226,21 @@ export function Waveform(props: Props) {
         ctx.lineTo(x, padT + plotH);
         ctx.stroke();
 
+        // time readout
         ctx.fillStyle = text;
         ctx.textAlign = "right";
         ctx.textBaseline = "bottom";
-        ctx.fillText(`${formatTime(cur)} / ${formatTime(audio.duration)}`, padL + plotW, padT - 2);
+        ctx.fillText(
+          `${formatTime(cur)} / ${formatTime(audio.duration)}`,
+          padL + plotW,
+          padT - 2
+        );
       }
     },
     [wave, audioUrl]
   );
 
-  // Build wave data from audioUrl OR from samples
+  // Build waveform from either audioUrl OR samples
   React.useEffect(() => {
     let cancelled = false;
 
@@ -237,22 +255,25 @@ export function Waveform(props: Props) {
       return;
     }
 
-    // Mode B: samples provided
-    if (inputSamples && inputSamples.length > 0) {
+    // Mode: samples provided
+    if (samples && samples.length > 0) {
       const width = canvas.clientWidth || 600;
       const columns = Math.max(200, Math.min(2000, Math.floor(width)));
-      const float = Float32Array.from(inputSamples);
-      const peaks = computePeaksFromSamples(float, columns);
 
-      // If you know real duration, pass it; otherwise show "relative" seconds (we estimate if sampleRate provided)
-      const sr = inputSampleRate ?? 22050;
-      const duration = inputSampleRate ? float.length / sr : 3; // fallback duration if unknown
+      const float = Float32Array.from(samples);
+      const peaks = computePeaks(float, columns);
+
+      const sr = sampleRate ?? 22050;
+      const duration =
+        typeof durationSec === "number" && Number.isFinite(durationSec) && durationSec > 0
+          ? durationSec
+          : float.length / sr;
 
       setWave({ peaks, duration, sampleRate: sr });
       return;
     }
 
-    // Mode A: decode from audioUrl
+    // Mode: audioUrl (accurate)
     if (!audioUrl) {
       draw({ forceIdle: true });
       return;
@@ -270,15 +291,12 @@ export function Waveform(props: Props) {
         const decoded = await ac.decodeAudioData(arr.slice(0));
         const ch0 = decoded.getChannelData(0);
 
-        const duration = decoded.duration;
-        const sampleRate = decoded.sampleRate;
-
         const width = canvas.clientWidth || 600;
         const columns = Math.max(200, Math.min(2000, Math.floor(width)));
-        const peaks = computePeaksFromSamples(ch0, columns);
+        const peaks = computePeaks(ch0, columns);
 
         if (cancelled) return;
-        setWave({ peaks, duration, sampleRate });
+        setWave({ peaks, duration: decoded.duration, sampleRate: decoded.sampleRate });
 
         ac.close().catch(() => {});
       } catch (e: any) {
@@ -290,28 +308,25 @@ export function Waveform(props: Props) {
     return () => {
       cancelled = true;
     };
-  }, [audioUrl, enabled, inputSamples, inputSampleRate, draw]);
+  }, [audioUrl, samples, sampleRate, durationSec, enabled, draw]);
 
-  // Draw on mount + resize (and also recompute peaks on resize)
+  // Redraw on resize (and recompute peaks for samples-mode to match new width)
   React.useEffect(() => {
     const onResize = () => {
-      // recompute peaks when we only have samples mode
-      // (audioUrl mode also benefits but not critical)
-      setWave((prev) => {
-        const canvas = canvasRef.current;
-        if (!canvas || !prev) return prev;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
 
-        // If we have input samples, recompute columns to match new width
-        if (inputSamples && inputSamples.length > 0) {
-          const width = canvas.clientWidth || 600;
-          const columns = Math.max(200, Math.min(2000, Math.floor(width)));
-          const float = Float32Array.from(inputSamples);
-          const peaks = computePeaksFromSamples(float, columns);
+      if (samples && samples.length > 0) {
+        const width = canvas.clientWidth || 600;
+        const columns = Math.max(200, Math.min(2000, Math.floor(width)));
+        const float = Float32Array.from(samples);
+        const peaks = computePeaks(float, columns);
+
+        setWave((prev) => {
+          if (!prev) return prev;
           return { ...prev, peaks };
-        }
-
-        return prev;
-      });
+        });
+      }
 
       draw();
     };
@@ -319,14 +334,13 @@ export function Waveform(props: Props) {
     window.addEventListener("resize", onResize);
     draw();
     return () => window.removeEventListener("resize", onResize);
-  }, [draw, inputSamples]);
+  }, [draw, samples]);
 
   // Animate playhead while playing (audioUrl mode only)
   React.useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    // If no audioUrl, do not attach listeners
     if (!audioUrl) return;
 
     const tick = () => {
@@ -376,7 +390,7 @@ export function Waveform(props: Props) {
 
   return (
     <div>
-      {/* Show audio controls only when audioUrl mode is active */}
+      {/* Only show audio controls when audioUrl exists */}
       {audioUrl ? (
         <audio
           ref={audioRef}
@@ -391,7 +405,7 @@ export function Waveform(props: Props) {
         <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
       </div>
 
-      {!audioUrl && !inputSamples ? (
+      {!audioUrl && (!samples || samples.length === 0) ? (
         <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>
           Mock mode: no audioUrl / samples yet.
         </div>
@@ -399,7 +413,7 @@ export function Waveform(props: Props) {
 
       {err ? (
         <div style={{ marginTop: 8, fontSize: 12, color: "#fecaca" }}>
-          Waveform decode error: {err}
+          Waveform error: {err}
         </div>
       ) : null}
 
