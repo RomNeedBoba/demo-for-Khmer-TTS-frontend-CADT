@@ -1,4 +1,5 @@
 import type { PipelineMode, StageId, StageState } from "../lib/pipeline/types";
+import styles from "./ui.module.css";
 
 export function AudioOutputCard({
   stage,
