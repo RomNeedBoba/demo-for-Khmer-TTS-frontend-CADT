@@ -18,7 +18,7 @@ export type TtsResponse = {
 };
 
 export async function apiTts(req: TtsRequest): Promise<TtsResponse> {
-  const baseUrl = import.meta.env.VITE_TTS_BASE_URL ?? "http://localhost:5000";
+  const baseUrl = import.meta.env.VITE_TTS_BASE_URL ?? "https://serverttscadto0.onrender.com";
 
   const res = await fetch(`${baseUrl}/api/tts`, {
     method: "POST",
