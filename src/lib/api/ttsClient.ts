@@ -18,7 +18,7 @@ export type TtsResponse = {
 };
 
 export async function apiTts(req: TtsRequest): Promise<TtsResponse> {
-  const baseUrl = import.meta.env.VITE_TTS_BASE_URL ?? "https://notre-newest-vary-invite.trycloudflare.com";
+  const baseUrl = import.meta.env.VITE_TTS_BASE_URL ?? "https://copying-organizer-regional-induction.trycloudflare.com";
 
   const res = await fetch(`${baseUrl}/api/tts`, {
     method: "POST",
